@@ -1,4 +1,4 @@
-// Chess.com Analyzer - Content Script
+// Chess.com Analyzer - Content Script (Version propre)
 
 // Injecter le CSS
 const style = document.createElement('style');
@@ -139,84 +139,19 @@ class ChessAnalyzer {
   constructor() {
     this.board = null;
     this.currentFEN = '';
-    this.stockfish = null;
+    this.analysisCache = new Map();
+    this.playerColor = null; // 'w' ou 'b'
+    this.lastAnalyzedTurn = null; // Pour éviter d'analyser plusieurs fois le même tour
+    this.waitingForOpponent = false;
     this.initStockfish();
     this.createUI();
     this.observeBoard();
   }
 
   initStockfish() {
-    console.log('🚀 Initialisation de Stockfish...');
-    
-    // Essayer d'abord l'API Lichess pour les ouvertures
-    this.analysisAPI = 'https://lichess.org/api/cloud-eval';
-    this.useStockfish = false;
-    
-    // Charger Stockfish en Web Worker
-    try {
-      const stockfishPath = chrome.runtime.getURL('stockfish.js');
-      console.log('📂 Chargement de Stockfish depuis:', stockfishPath);
-      
-      this.stockfish = new Worker(stockfishPath);
-      this.stockfishReady = false;
-      
-      this.stockfish.onmessage = (event) => {
-        const line = event.data;
-        console.log('Stockfish:', line);
-        
-        if (line.includes('uciok')) {
-          console.log('✅ Stockfish UCI OK');
-          this.stockfish.postMessage('setoption name Threads value 2');
-          this.stockfish.postMessage('setoption name Hash value 128');
-          this.stockfish.postMessage('setoption name Skill Level value 20');
-          this.stockfish.postMessage('isready');
-        } else if (line.includes('readyok')) {
-          console.log('✅ Stockfish prêt!');
-          this.stockfishReady = true;
-          this.updateStatus('🟢 Stockfish prêt');
-        } else if (line.includes('bestmove')) {
-          const parts = line.split(' ');
-          const bestMove = parts[1];
-          console.log('🎯 Meilleur coup Stockfish:', bestMove);
-          this.displayBestMove(bestMove);
-          this.updateStatus('🟢 Analyse terminée');
-        } else if (line.includes('info') && line.includes('depth')) {
-          this.parseStockfishInfo(line);
-        }
-      };
-      
-      this.stockfish.onerror = (error) => {
-        console.error('❌ Erreur Stockfish:', error);
-        this.stockfishReady = false;
-      };
-      
-      // Initialiser Stockfish
-      this.stockfish.postMessage('uci');
-      
-    } catch (error) {
-      console.error('❌ Impossible de charger Stockfish:', error);
-      this.updateStatus('⚠️ Stockfish non disponible');
-    }
-  }
-  
-  parseStockfishInfo(line) {
-    // Extraire la profondeur
-    const depthMatch = line.match(/depth (\d+)/);
-    if (depthMatch) {
-      document.getElementById('depth').textContent = depthMatch[1];
-    }
-    
-    // Extraire l'évaluation
-    const cpMatch = line.match(/score cp (-?\d+)/);
-    const mateMatch = line.match(/score mate (-?\d+)/);
-    
-    if (cpMatch) {
-      const score = parseInt(cpMatch[1]) / 100;
-      this.displayEvaluation(score);
-    } else if (mateMatch) {
-      const mateIn = parseInt(mateMatch[1]);
-      this.displayEvaluation(`Mat en ${Math.abs(mateIn)}`, mateIn > 0);
-    }
+    console.log('🚀 Initialisation via Background Worker...');
+    this.updateStatus('🟢 Système prêt');
+    console.log('✅ Utilisation du Service Worker (pas de CORS!)');
   }
 
   createUI() {
@@ -228,9 +163,14 @@ class ChessAnalyzer {
         <button id="toggle-analyzer">●</button>
       </div>
       <div class="analyzer-content">
+        <div id="color-selector" style="margin-bottom: 15px; text-align: center;">
+          <div style="font-size: 12px; margin-bottom: 8px; opacity: 0.8;">Votre couleur :</div>
+          <button id="select-white" style="background: rgba(255,255,255,0.2); border: none; color: white; padding: 8px 15px; border-radius: 5px; cursor: pointer; margin: 0 5px; transition: all 0.2s;">♙ Blancs</button>
+          <button id="select-black" style="background: rgba(255,255,255,0.2); border: none; color: white; padding: 8px 15px; border-radius: 5px; cursor: pointer; margin: 0 5px; transition: all 0.2s;">♟️ Noirs</button>
+        </div>
         <div class="best-move-section">
           <div class="label">Meilleur coup:</div>
-          <div id="best-move" class="best-move">En attente...</div>
+          <div id="best-move" class="best-move">Sélectionnez couleur</div>
         </div>
         <div class="evaluation-section">
           <div class="label">Évaluation:</div>
@@ -241,24 +181,43 @@ class ChessAnalyzer {
           <div id="depth" class="depth">0</div>
         </div>
         <div class="status-section">
-          <div id="status" class="status">⚪ Inactif</div>
+          <div id="status" class="status">❓ Choisissez votre couleur</div>
         </div>
       </div>
     `;
     document.body.appendChild(panel);
 
-    // Toggle panel
     document.getElementById('toggle-analyzer').addEventListener('click', () => {
       panel.classList.toggle('minimized');
+    });
+    
+    // Gestion des boutons de sélection de couleur
+    const whiteBtn = document.getElementById('select-white');
+    const blackBtn = document.getElementById('select-black');
+    
+    whiteBtn.addEventListener('click', () => {
+      this.playerColor = 'w';
+      console.log('♙ Blancs sélectionnés manuellement');
+      whiteBtn.style.background = 'rgba(255,255,255,0.5)';
+      blackBtn.style.background = 'rgba(255,255,255,0.2)';
+      this.updateStatus('♙ Blancs - En attente du début');
+      this.checkBoardState(); // Relancer la vérification
+    });
+    
+    blackBtn.addEventListener('click', () => {
+      this.playerColor = 'b';
+      console.log('♟️ Noirs sélectionnés manuellement');
+      blackBtn.style.background = 'rgba(255,255,255,0.5)';
+      whiteBtn.style.background = 'rgba(255,255,255,0.2)';
+      this.updateStatus('♟️ Noirs - En attente du début');
+      this.checkBoardState(); // Relancer la vérification
     });
   }
 
   observeBoard() {
     console.log('🔍 Démarrage de l\'observation de l\'échiquier...');
     
-    // Attendre que l'échiquier soit chargé
     const waitForBoard = setInterval(() => {
-      // Recherche de différents sélecteurs possibles pour l'échiquier
       const board = document.querySelector('.board') || 
                     document.querySelector('[class*="board"]') ||
                     document.querySelector('chess-board') ||
@@ -268,8 +227,9 @@ class ChessAnalyzer {
         console.log('✅ Échiquier trouvé!', board);
         clearInterval(waitForBoard);
         
-        // Observer les changements
-        const observer = new MutationObserver(() => {
+        // Observer les changements avec configuration agressive
+        const observer = new MutationObserver((mutations) => {
+          // Vérifier immédiatement à chaque mutation
           this.checkBoardState();
         });
 
@@ -277,13 +237,14 @@ class ChessAnalyzer {
           childList: true,
           subtree: true,
           attributes: true,
+          attributeFilter: ['class', 'style'], // Observer les changements de classes
           characterData: true
         });
         
-        // Vérification périodique toutes les 2 secondes
+        // Vérification périodique PLUS FRÉQUENTE (toutes les 500ms au lieu de 2s)
         setInterval(() => {
           this.checkBoardState();
-        }, 2000);
+        }, 500);
         
         // Première vérification immédiate
         this.checkBoardState();
@@ -296,25 +257,108 @@ class ChessAnalyzer {
   checkBoardState() {
     try {
       const fen = this.extractFEN();
-      console.log('FEN extrait:', fen);
       
-      if (fen && fen !== this.currentFEN && fen !== 'position initiale') {
-        console.log('✅ Nouvelle position détectée!');
+      if (!fen) {
+        return;
+      }
+      
+      // Vérifier si la couleur est sélectionnée
+      if (this.playerColor === null) {
+        return;
+      }
+      
+      // Détecter un VRAI changement (pas juste une re-extraction du même FEN)
+      if (fen === this.previousFEN) {
+        return; // Rien n'a changé
+      }
+      
+      // Un changement a été détecté !
+      console.log('🔄 Changement détecté!');
+      if (this.previousFEN) {
+        console.log('📋 Ancien FEN:', this.previousFEN.substring(0, 50) + '...');
+      }
+      console.log('📋 Nouveau FEN:', fen.substring(0, 50) + '...');
+      
+      this.previousFEN = fen;
+      
+      // Extraire le tour depuis le FEN
+      const fenParts = fen.split(' ');
+      const turnColor = fenParts[1] || 'w';
+      const fullMoveNumber = fenParts[5] || '1';
+      
+      console.log(`👤 Tour: ${turnColor === 'w' ? 'Blancs' : 'Noirs'} (coup ${fullMoveNumber})`);
+      console.log(`🎮 Vous êtes: ${this.playerColor === 'w' ? 'Blancs' : 'Noirs'}`);
+      
+      if (turnColor === this.playerColor) {
+        // C'est notre tour !
+        console.log(`✅ C'est VOTRE tour!`);
+        
         this.currentFEN = fen;
+        this.waitingForOpponent = false;
+        
+        // Lancer l'analyse
         this.analyzeFEN(fen);
-        this.updateStatus('🟢 Analyse en cours...');
-      } else if (!fen) {
-        console.log('⚠️ Impossible d\'extraire le FEN');
+        this.updateStatus(`🎯 Votre tour (${this.playerColor === 'w' ? '♙' : '♟️'})`);
+      } else {
+        // Tour de l'adversaire
+        console.log(`⏳ Tour de l'adversaire`);
+        this.waitingForOpponent = true;
+        this.updateStatus(`⏳ Tour adverse (${turnColor === 'w' ? '♙' : '♟️'})`);
+        
+        // Afficher "En attente..."
+        const bestMoveElem = document.getElementById('best-move');
+        if (bestMoveElem) {
+          bestMoveElem.textContent = 'En attente...';
+        }
       }
     } catch (e) {
-      console.error('❌ Erreur extraction FEN:', e);
+      console.error('❌ Erreur checkBoardState:', e);
+    }
+  }
+  
+  detectPlayerColor() {
+    const boardElement = document.querySelector('.board, [class*="board"]');
+    if (!boardElement) {
+      console.log('⚠️ Échiquier non trouvé');
+      this.showColorSelector();
+      return;
+    }
+    
+    const classes = boardElement.className;
+    console.log('🔍 Classes échiquier:', classes);
+    
+    // Méthode fiable: classe "flipped"
+    if (classes.includes('flipped')) {
+      this.playerColor = 'b';
+      console.log('♟️ Noirs détectés (flipped)');
+      this.updateStatus('♟️ Noirs');
+      return;
+    }
+    
+    // Si pas "flipped", probablement blancs
+    if (classes.includes('board') && !classes.includes('flipped')) {
+      this.playerColor = 'w';
+      console.log('♙ Blancs détectés (pas flipped)');
+      this.updateStatus('♙ Blancs');
+      return;
+    }
+    
+    // Sinon, demander à l'utilisateur
+    console.log('⚠️ Détection auto impossible, demande manuelle');
+    this.showColorSelector();
+  }
+  
+  showColorSelector() {
+    const selector = document.getElementById('color-selector');
+    if (selector) {
+      selector.style.display = 'block';
+      this.updateStatus('❓ Choisissez votre couleur');
     }
   }
 
   extractFEN() {
     console.log('🔍 Tentative d\'extraction du FEN...');
     
-    // Méthode 1: Essayer d'accéder à l'objet global de Chess.com
     if (typeof window.chessGame !== 'undefined') {
       try {
         const fen = window.chessGame.getFEN();
@@ -325,7 +369,6 @@ class ChessAnalyzer {
       }
     }
     
-    // Méthode 2: Via les données de l'échiquier
     const boardData = document.querySelector('[data-fen]');
     if (boardData) {
       const fen = boardData.getAttribute('data-fen');
@@ -333,7 +376,6 @@ class ChessAnalyzer {
       return fen;
     }
     
-    // Méthode 3: Via chess-board component
     const chessBoard = document.querySelector('chess-board, wc-chess-board');
     if (chessBoard) {
       const fen = chessBoard.getAttribute('fen') || chessBoard.getAttribute('data-fen');
@@ -343,34 +385,28 @@ class ChessAnalyzer {
       }
     }
     
-    // Méthode 4: Extraction visuelle améliorée
     console.log('🔍 Tentative d\'extraction visuelle...');
     return this.extractFENVisually();
   }
 
   extractFENVisually() {
-    // Chercher toutes les pièces avec différents sélecteurs
     let pieces = document.querySelectorAll('.piece, [class*="piece"]');
     console.log(`📍 ${pieces.length} éléments "piece" trouvés au total`);
     
-    // Filtrer pour ne garder que les pièces sur l'échiquier
     pieces = Array.from(pieces).filter(piece => {
-      // Vérifier que la pièce est bien dans une case de l'échiquier
       const parent = piece.closest('[class*="square"]');
       if (!parent) return false;
       
-      // Vérifier que la pièce est visible (pas capturée)
       const style = window.getComputedStyle(piece);
       if (style.display === 'none' || style.visibility === 'hidden') return false;
       
-      // Vérifier que c'est bien dans l'échiquier principal
       const board = piece.closest('.board, [class*="board"]');
       if (!board) return false;
       
       return true;
     });
     
-    console.log(`📍 ${pieces.length} pièces sur l'échiquier après filtrage`);
+    console.log(`📍 ${pieces.length} pièces sur l\'échiquier après filtrage`);
     
     if (pieces.length === 0) {
       console.log('⚠️ Aucune pièce trouvée');
@@ -378,8 +414,7 @@ class ChessAnalyzer {
     }
     
     if (pieces.length > 32) {
-      console.log('⚠️ Trop de pièces, tentative de filtrage supplémentaire...');
-      // Garder seulement les 32 premières si nécessaire
+      console.log('⚠️ Trop de pièces, filtrage...');
       pieces = pieces.slice(0, 32);
     }
 
@@ -389,36 +424,61 @@ class ChessAnalyzer {
     pieces.forEach((piece, index) => {
       try {
         const classes = piece.className;
-        console.log(`Pièce ${index}:`, classes);
+        console.log(`🔍 Pièce ${index}: classes="${classes}"`);
         
-        // Extraire le type et la couleur de la pièce
         let color = null;
         let type = null;
         
-        // Détection de la couleur (w = blanc, b = noir)
-        if (classes.match(/\bw[a-z]/i) || classes.includes('white')) color = 'w';
-        else if (classes.match(/\bb[a-z]/i) || classes.includes('black')) color = 'b';
+        // Détecter la couleur - AMÉLIORÉ
+        if (classes.match(/\bw[a-z]/i) || classes.includes('white') || classes.includes('-w')) {
+          color = 'w';
+        } else if (classes.match(/\bb[a-z]/i) || classes.includes('black') || classes.includes('-b')) {
+          color = 'b';
+        }
         
-        // Détection du type de pièce
-        if (classes.match(/\b[wb]?p\b/i) || classes.includes('pawn')) type = 'p';
-        else if (classes.match(/\b[wb]?r\b/i) || classes.includes('rook')) type = 'r';
-        else if (classes.match(/\b[wb]?n\b/i) || classes.includes('knight')) type = 'n';
-        else if (classes.match(/\b[wb]?b\b/i) || classes.includes('bishop')) type = 'b';
-        else if (classes.match(/\b[wb]?q\b/i) || classes.includes('queen')) type = 'q';
-        else if (classes.match(/\b[wb]?k\b/i) || classes.includes('king')) type = 'k';
+        // Détecter le type - AMÉLIORÉ avec plus de patterns
+        if (classes.match(/\b[wb]?p\b/i) || classes.includes('pawn') || classes.includes('-p')) {
+          type = 'p';
+        } else if (classes.match(/\b[wb]?r\b/i) || classes.includes('rook') || classes.includes('-r')) {
+          type = 'r';
+        } else if (classes.match(/\b[wb]?n\b/i) || classes.includes('knight') || classes.includes('-n')) {
+          type = 'n';
+        } else if (classes.match(/\b[wb]?b\b/i) || classes.includes('bishop') || classes.includes('-b')) {
+          type = 'b';
+        } else if (classes.match(/\b[wb]?q\b/i) || classes.includes('queen') || classes.includes('-q')) {
+          type = 'q';
+        } else if (classes.match(/\b[wb]?k\b/i) || classes.includes('king') || classes.includes('-k')) {
+          type = 'k';
+        }
+        
+        // Si on n'a pas trouvé, essayer avec le style background-image
+        if (!type) {
+          const style = window.getComputedStyle(piece);
+          const bgImage = style.backgroundImage || '';
+          console.log(`🖼️ Background image: ${bgImage}`);
+          
+          if (bgImage.includes('queen') || bgImage.includes('wq') || bgImage.includes('bq')) type = 'q';
+          else if (bgImage.includes('king') || bgImage.includes('wk') || bgImage.includes('bk')) type = 'k';
+          else if (bgImage.includes('rook') || bgImage.includes('wr') || bgImage.includes('br')) type = 'r';
+          else if (bgImage.includes('bishop') || bgImage.includes('wb') || bgImage.includes('bb')) type = 'b';
+          else if (bgImage.includes('knight') || bgImage.includes('wn') || bgImage.includes('bn')) type = 'n';
+          else if (bgImage.includes('pawn') || bgImage.includes('wp') || bgImage.includes('bp')) type = 'p';
+          
+          if (bgImage.includes('/w') || bgImage.includes('white')) color = 'w';
+          else if (bgImage.includes('/b') || bgImage.includes('black')) color = 'b';
+        }
         
         if (!color || !type) {
-          console.log('⚠️ Impossible de déterminer type/couleur pour:', classes);
+          console.log(`❌ Impossible de déterminer: color=${color}, type=${type}`);
           return;
         }
         
-        // Trouver la position sur l'échiquier
+        console.log(`✅ Détecté: ${color}${type}`);
+        
         const parent = piece.closest('[class*="square"]');
         if (parent) {
           const squareClass = parent.className;
-          console.log('Case:', squareClass);
           
-          // Extraire les coordonnées (ex: square-11, square-18, etc.)
           const match = squareClass.match(/square-?(\d)(\d)/);
           if (match) {
             let file = parseInt(match[1]) - 1;
@@ -428,7 +488,7 @@ class ChessAnalyzer {
               const pieceChar = color === 'w' ? type.toUpperCase() : type.toLowerCase();
               board[rank][file] = pieceChar;
               piecesPlaced++;
-              console.log(`✅ Pièce placée: ${pieceChar} en (${file},${rank})`);
+              console.log(`✅ Pièce placée: ${pieceChar} en ${String.fromCharCode(97 + file)}${8 - rank}`);
             }
           }
         }
@@ -445,14 +505,6 @@ class ChessAnalyzer {
     }
 
     return this.boardToFEN(board);
-  }
-
-  getPieceChar(color, type) {
-    const pieceMap = {
-      'wp': 'P', 'wn': 'N', 'wb': 'B', 'wr': 'R', 'wq': 'Q', 'wk': 'K',
-      'bp': 'p', 'bn': 'n', 'bb': 'b', 'br': 'r', 'bq': 'q', 'bk': 'k'
-    };
-    return pieceMap[color.slice(0, 1) + type.slice(-1)] || '';
   }
 
   boardToFEN(board) {
@@ -476,11 +528,9 @@ class ChessAnalyzer {
       if (rank < 7) fen += '/';
     }
     
-    // Retourner une position FEN simplifiée
     const fullFEN = fen + ' w KQkq - 0 1';
     console.log('📋 FEN généré:', fullFEN);
     
-    // Vérifier si c'est une position valide (au moins un roi de chaque couleur)
     if (!fen.includes('K') || !fen.includes('k')) {
       console.log('❌ Position invalide (rois manquants)');
       return null;
@@ -489,128 +539,59 @@ class ChessAnalyzer {
     return fullFEN;
   }
 
-  analyzeFEN(fen) {
-    // Analyse via API Lichess
-    console.log('📤 Envoi à Lichess:', fen);
-    this.updateStatus('🔍 Analyse en cours...');
+  async analyzeFEN(fen) {
+    console.log('📤 Demande d\'analyse:', fen);
     
-    fetch(`${this.analysisAPI}?fen=${encodeURIComponent(fen)}&multiPv=1`, {
-      method: 'GET',
-      headers: {
-        'Accept': 'application/json'
-      }
-    })
-    .then(response => {
-      console.log('📥 Réponse reçue, status:', response.status);
-      if (response.status === 404) {
-        console.log('⚠️ Position non trouvée dans le cloud, tentative analyse locale...');
-        this.useLocalAnalysis(fen);
-        return null;
-      }
-      return response.json();
-    })
-    .then(data => {
-      if (!data) return; // Déjà géré par le 404
+    if (this.analysisCache.has(fen)) {
+      console.log('📦 Résultat en cache');
+      const cached = this.analysisCache.get(fen);
+      this.displayResult(cached);
+      return;
+    }
+    
+    this.updateStatus('🔍 Analyse...');
+    
+    try {
+      const result = await chrome.runtime.sendMessage({
+        action: 'analyzeFEN',
+        fen: fen
+      });
       
-      console.log('✅ Données Lichess:', data);
-      
-      if (data.pvs && data.pvs.length > 0) {
-        const bestLine = data.pvs[0];
-        
-        // Meilleur coup
-        if (bestLine.moves) {
-          const moves = bestLine.moves.split(' ');
-          console.log('🎯 Meilleur coup:', moves[0]);
-          this.displayBestMove(moves[0]);
-        }
-        
-        // Évaluation
-        if (bestLine.cp !== undefined) {
-          // Centipawns
-          const eval_score = bestLine.cp / 100;
-          console.log('📊 Évaluation:', eval_score);
-          this.displayEvaluation(eval_score);
-        } else if (bestLine.mate !== undefined) {
-          // Mat en X coups
-          console.log('♔ Mat en:', bestLine.mate);
-          this.displayEvaluation(`Mat en ${Math.abs(bestLine.mate)}`, bestLine.mate > 0);
-        }
-        
-        // Profondeur
-        if (data.depth) {
-          console.log('🔢 Profondeur:', data.depth);
-          document.getElementById('depth').textContent = data.depth;
-        }
-        
-        this.updateStatus('🟢 Analyse terminée');
-      } else if (data.error) {
-        console.log('⚠️ Erreur API:', data.error);
-        this.useLocalAnalysis(fen);
+      if (result && !result.error) {
+        console.log('✅ Résultat reçu du worker:', result);
+        this.displayResult(result);
+        this.analysisCache.set(fen, result);
       } else {
-        console.log('⚠️ Aucune analyse dans la réponse');
-        this.useLocalAnalysis(fen);
+        console.log('⚠️ Pas de résultat API, analyse locale');
+        // Extraire le tour depuis le FEN
+        const fenParts = fen.split(' ');
+        const turn = fenParts[1] || 'w';
+        await this.improvedHeuristicAnalysis(fen, turn);
       }
-    })
-    .catch(error => {
-      console.error('❌ Erreur API Lichess:', error);
-      this.useLocalAnalysis(fen);
-    });
-  }
-  
-  useLocalAnalysis(fen) {
-    // Analyse basique locale quand l'API échoue
-    console.log('🔧 Utilisation de l\'analyse locale basique');
-    this.updateStatus('🟡 Analyse basique...');
-    
-    const moves = this.generateBasicMoves(fen);
-    
-    if (moves.length > 0) {
-      // Choisir un coup aléatoire parmi les meilleurs
-      const randomMove = moves[Math.floor(Math.random() * Math.min(3, moves.length))];
-      this.displayBestMove(randomMove);
-      this.displayEvaluation(0.0); // Évaluation neutre
-      document.getElementById('depth').textContent = 'Local';
-      this.updateStatus('🟡 Analyse locale');
-    } else {
-      this.displayBestMove('N/A');
-      this.updateStatus('⚠️ Position complexe');
+    } catch (error) {
+      console.log('⚠️ Worker non disponible, analyse locale');
+      const fenParts = fen.split(' ');
+      const turn = fenParts[1] || 'w';
+      await this.improvedHeuristicAnalysis(fen, turn);
     }
   }
-  
-  generateBasicMoves(fen) {
-    // Génération de coups basiques selon les principes d'échecs
-    const suggestions = [];
+
+  displayResult(result) {
+    this.displayBestMove(result.move);
     
-    // Parser le FEN pour savoir qui joue
-    const parts = fen.split(' ');
-    const position = parts[0];
-    const turn = parts[1] || 'w';
-    
-    // Suggestions génériques intelligentes selon la phase de jeu
-    if (this.isOpeningPhase(position)) {
-      // Ouverture : contrôle du centre
-      suggestions.push('e2e4', 'd2d4', 'g1f3', 'b1c3', 'c2c4', 'e7e5', 'd7d5', 'g8f6');
-    } else if (this.isEndgamePhase(position)) {
-      // Finale : activation du roi
-      suggestions.push('e1e2', 'e1f2', 'e8e7', 'e8f7', 'a2a4', 'h2h4');
-    } else {
-      // Milieu de jeu : développement et tactiques
-      suggestions.push('f1e2', 'f8e7', 'b1c3', 'b8c6', 'c1f4', 'c8f5');
+    if (result.evaluation !== null && result.evaluation !== undefined) {
+      this.displayEvaluation(result.evaluation);
+    } else if (result.mate !== null && result.mate !== undefined) {
+      this.displayEvaluation(`Mat en ${Math.abs(result.mate)}`, result.mate > 0);
     }
     
-    return suggestions;
-  }
-  
-  isOpeningPhase(position) {
-    // Détection simple : beaucoup de pièces sur le plateau
-    const pieces = position.replace(/[/\d]/g, '');
-    return pieces.length > 24;
-  }
-  
-  isEndgamePhase(position) {
-    // Détection simple : peu de pièces sur le plateau
-    const pieces = position.replace(/[/\d]/g, '');
-    return pieces.length < 12;
+    if (result.source === 'cloud') {
+      document.getElementById('depth').textContent = result.depth + ' 🌩️';
+      this.updateStatus('🟢 Cloud Lichess');
+    } else if (result.source === 'explorer') {
+      document.getElementById('depth').textContent = result.games + '📚';
+      this.updateStatus('🟢 DB Lichess');
+    }
   }
 
   displayBestMove(move) {
@@ -626,11 +607,9 @@ class ChessAnalyzer {
     const elem = document.getElementById('evaluation');
     if (elem) {
       if (typeof score === 'string') {
-        // C'est un mat
         elem.textContent = score;
         elem.className = 'evaluation ' + (isMate ? 'positive' : 'negative');
       } else {
-        // C'est un score en centipawns
         elem.textContent = (score > 0 ? '+' : '') + score.toFixed(2);
         elem.className = 'evaluation ' + (score > 0.5 ? 'positive' : score < -0.5 ? 'negative' : 'neutral');
       }
@@ -644,14 +623,677 @@ class ChessAnalyzer {
     return `${from} → ${to}`;
   }
 
-  updateAnalysis(msg) {
-    // Cette méthode n'est plus utilisée avec l'API Lichess
-    // Gardée pour compatibilité
-  }
-
   updateStatus(text) {
     const elem = document.getElementById('status');
     if (elem) elem.textContent = text;
+  }
+
+  // ============ ANALYSE HEURISTIQUE ============
+
+  async analyzeWithOpeningBook(fen) {
+    const openingBook = {
+      'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR': ['e2e4', 'd2d4', 'g1f3', 'c2c4'],
+      'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR': ['e7e5', 'c7c5', 'e7e6', 'c7c6'],
+      'rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR': ['g1f3', 'b1c3', 'f1c4'],
+    };
+    
+    const position = fen.split(' ')[0];
+    
+    if (openingBook[position]) {
+      const moves = openingBook[position];
+      const bestMove = moves[0];
+      
+      this.displayBestMove(bestMove);
+      this.displayEvaluation(0.2);
+      document.getElementById('depth').textContent = '📖';
+      this.updateStatus('🟢 Livre d\'ouvertures');
+      
+      return { move: bestMove, evaluation: 0.2, source: 'book' };
+    }
+    
+    return null;
+  }
+
+  async improvedHeuristicAnalysis(fen, turn) {
+    console.log('🧠 Analyse heuristique avancée');
+    console.log(`📍 Tour: ${turn === 'w' ? 'Blancs' : 'Noirs'}`);
+    
+    const parts = fen.split(' ');
+    const position = parts[0];
+    
+    const bookMove = await this.analyzeWithOpeningBook(fen);
+    if (bookMove) {
+      return bookMove;
+    }
+    
+    const board = this.fenToBoard(position);
+    const legalMoves = this.generateLegalMoves(board, turn);
+    
+    if (legalMoves.length === 0) {
+      this.displayBestMove('Aucun coup');
+      this.updateStatus('⚠️ Fin de partie');
+      return null;
+    }
+    
+    const evaluatedMoves = [];
+    
+    for (let move of legalMoves) {
+      const score = this.evaluateMoveDeep(board, move, turn);
+      evaluatedMoves.push({ move, score });
+    }
+    
+    evaluatedMoves.sort((a, b) => b.score - a.score);
+    
+    const best = evaluatedMoves[0];
+    const topMoves = evaluatedMoves.slice(0, 3);
+    
+    console.log('🎯 Top 3:', topMoves.map(m => `${m.move}(${m.score})`).join(', '));
+    
+    this.displayBestMove(best.move);
+    
+    const normalizedScore = Math.max(-5, Math.min(5, best.score / 100));
+    this.displayEvaluation(normalizedScore);
+    
+    document.getElementById('depth').textContent = `${legalMoves.length}🧠`;
+    this.updateStatus('🟡 Analyse tactique');
+    
+    return { move: best.move, evaluation: normalizedScore, source: 'tactical' };
+  }
+
+  fenToBoard(fen) {
+    const rows = fen.split('/');
+    const board = [];
+    
+    for (let row of rows) {
+      const boardRow = [];
+      for (let char of row) {
+        if (char >= '1' && char <= '8') {
+          for (let i = 0; i < parseInt(char); i++) {
+            boardRow.push('');
+          }
+        } else {
+          boardRow.push(char);
+        }
+      }
+      board.push(boardRow);
+    }
+    
+    return board;
+  }
+
+  generateLegalMoves(board, turn) {
+    const moves = [];
+    const isWhite = turn === 'w';
+    
+    for (let row = 0; row < 8; row++) {
+      for (let col = 0; col < 8; col++) {
+        const piece = board[row][col];
+        if (!piece) continue;
+        
+        const pieceIsWhite = piece === piece.toUpperCase();
+        if (pieceIsWhite !== isWhite) continue;
+        
+        const pieceMoves = this.generatePieceMoves(board, row, col, piece.toLowerCase());
+        
+        // IMPORTANT : Filtrer les coups qui laissent le roi en échec
+        for (let move of pieceMoves) {
+          const testBoard = this.applyMove(board, move);
+          
+          // Vérifier si ce coup laisse notre roi en échec
+          if (!this.isKingInCheck(testBoard, turn)) {
+            moves.push(move);
+          }
+        }
+      }
+    }
+    
+    return moves;
+  }
+  
+  isKingInCheck(board, kingColor) {
+    // Trouver notre roi
+    const ourKing = kingColor === 'w' ? 'K' : 'k';
+    let kingRow = -1;
+    let kingCol = -1;
+    
+    for (let row = 0; row < 8; row++) {
+      for (let col = 0; col < 8; col++) {
+        if (board[row][col] === ourKing) {
+          kingRow = row;
+          kingCol = col;
+          break;
+        }
+      }
+      if (kingRow !== -1) break;
+    }
+    
+    if (kingRow === -1) return false;
+    
+    // Vérifier si une pièce ennemie attaque notre roi
+    const isWhite = kingColor === 'w';
+    
+    for (let row = 0; row < 8; row++) {
+      for (let col = 0; col < 8; col++) {
+        const piece = board[row][col];
+        if (!piece) continue;
+        
+        const pieceIsWhite = piece === piece.toUpperCase();
+        if (pieceIsWhite === isWhite) continue; // C'est notre pièce
+        
+        // Vérifier si cette pièce ennemie attaque notre roi
+        if (this.canAttack(board, row, col, kingRow, kingCol, piece.toLowerCase())) {
+          return true;
+        }
+      }
+    }
+    
+    return false;
+  }
+
+  generatePieceMoves(board, row, col, pieceType) {
+    const moves = [];
+    const fromSquare = this.coordsToSquare(col, row);
+    
+    switch (pieceType) {
+      case 'p':
+        moves.push(...this.generatePawnMoves(board, row, col));
+        break;
+      case 'n':
+        moves.push(...this.generateKnightMoves(board, row, col));
+        break;
+      case 'b':
+        moves.push(...this.generateBishopMoves(board, row, col));
+        break;
+      case 'r':
+        moves.push(...this.generateRookMoves(board, row, col));
+        break;
+      case 'q':
+        moves.push(...this.generateQueenMoves(board, row, col));
+        break;
+      case 'k':
+        moves.push(...this.generateKingMoves(board, row, col));
+        break;
+    }
+    
+    return moves.map(to => fromSquare + to);
+  }
+
+  generatePawnMoves(board, row, col) {
+    const moves = [];
+    const piece = board[row][col];
+    const isWhite = piece === piece.toUpperCase();
+    const direction = isWhite ? -1 : 1;
+    
+    const newRow = row + direction;
+    if (newRow >= 0 && newRow < 8 && !board[newRow][col]) {
+      moves.push(this.coordsToSquare(col, newRow));
+      
+      const startRow = isWhite ? 6 : 1;
+      if (row === startRow && !board[row + 2 * direction][col]) {
+        moves.push(this.coordsToSquare(col, row + 2 * direction));
+      }
+    }
+    
+    for (let dcol of [-1, 1]) {
+      const newCol = col + dcol;
+      if (newCol >= 0 && newCol < 8 && newRow >= 0 && newRow < 8) {
+        const target = board[newRow][newCol];
+        if (target && (target === target.toUpperCase()) !== isWhite) {
+          moves.push(this.coordsToSquare(newCol, newRow));
+        }
+      }
+    }
+    
+    return moves;
+  }
+
+  generateKnightMoves(board, row, col) {
+    const moves = [];
+    const piece = board[row][col];
+    const isWhite = piece === piece.toUpperCase();
+    const deltas = [[-2,-1],[-2,1],[-1,-2],[-1,2],[1,-2],[1,2],[2,-1],[2,1]];
+    
+    for (let [dr, dc] of deltas) {
+      const newRow = row + dr;
+      const newCol = col + dc;
+      
+      if (newRow >= 0 && newRow < 8 && newCol >= 0 && newCol < 8) {
+        const target = board[newRow][newCol];
+        if (!target || (target === target.toUpperCase()) !== isWhite) {
+          moves.push(this.coordsToSquare(newCol, newRow));
+        }
+      }
+    }
+    
+    return moves;
+  }
+
+  generateBishopMoves(board, row, col) {
+    return this.generateSlidingMoves(board, row, col, [[1,1],[1,-1],[-1,1],[-1,-1]]);
+  }
+
+  generateRookMoves(board, row, col) {
+    return this.generateSlidingMoves(board, row, col, [[1,0],[-1,0],[0,1],[0,-1]]);
+  }
+
+  generateQueenMoves(board, row, col) {
+    return this.generateSlidingMoves(board, row, col, [[1,1],[1,-1],[-1,1],[-1,-1],[1,0],[-1,0],[0,1],[0,-1]]);
+  }
+
+  generateKingMoves(board, row, col) {
+    const moves = [];
+    const piece = board[row][col];
+    const isWhite = piece === piece.toUpperCase();
+    
+    for (let dr = -1; dr <= 1; dr++) {
+      for (let dc = -1; dc <= 1; dc++) {
+        if (dr === 0 && dc === 0) continue;
+        
+        const newRow = row + dr;
+        const newCol = col + dc;
+        
+        if (newRow >= 0 && newRow < 8 && newCol >= 0 && newCol < 8) {
+          const target = board[newRow][newCol];
+          if (!target || (target === target.toUpperCase()) !== isWhite) {
+            moves.push(this.coordsToSquare(newCol, newRow));
+          }
+        }
+      }
+    }
+    
+    return moves;
+  }
+
+  generateSlidingMoves(board, row, col, directions) {
+    const moves = [];
+    const piece = board[row][col];
+    const isWhite = piece === piece.toUpperCase();
+    
+    for (let [dr, dc] of directions) {
+      let newRow = row + dr;
+      let newCol = col + dc;
+      
+      while (newRow >= 0 && newRow < 8 && newCol >= 0 && newCol < 8) {
+        const target = board[newRow][newCol];
+        
+        if (!target) {
+          moves.push(this.coordsToSquare(newCol, newRow));
+        } else {
+          if ((target === target.toUpperCase()) !== isWhite) {
+            moves.push(this.coordsToSquare(newCol, newRow));
+          }
+          break;
+        }
+        
+        newRow += dr;
+        newCol += dc;
+      }
+    }
+    
+    return moves;
+  }
+
+  coordsToSquare(col, row) {
+    const files = 'abcdefgh';
+    return files[col] + (8 - row);
+  }
+
+  evaluateMoveDeep(board, move, turn) {
+    let score = this.evaluateMove(board, move, turn);
+    
+    const newBoard = this.applyMove(board, move);
+    const positionScore = this.evaluatePosition(newBoard, turn);
+    
+    score += positionScore;
+    
+    // Vérifier d'abord si c'est la Dame qui bouge
+    const fromFile = move.charCodeAt(0) - 97;
+    const fromRank = 8 - parseInt(move[1]);
+    const piece = board[fromRank][fromFile];
+    const toFile = move.charCodeAt(2) - 97;
+    const toRank = 8 - parseInt(move[3]);
+    
+    // PROTECTION ABSOLUE : Si la Dame va sur une case dangereuse, annuler TOUS les bonus
+    if (piece.toLowerCase() === 'q') {
+      const isAttacked = this.isSquareAttacked(newBoard, toRank, toFile, turn === 'w' ? 'b' : 'w');
+      const target = board[toRank][toFile];
+      const pieceValues = { 'p': 100, 'n': 320, 'b': 330, 'r': 500, 'q': 900, 'k': 0 };
+      const targetValue = target ? (pieceValues[target.toLowerCase()] || 0) : 0;
+      
+      if (isAttacked && targetValue < 900) {
+        // Dame sur case attaquée pour capturer moins qu'une Dame = INTERDIT
+        console.log(`🚫 VETO : Dame exposée pour gain insuffisant (${targetValue})`);
+        return -10000; // Score catastrophique qui annule tout
+      }
+    }
+    
+    // Seulement maintenant, ajouter les bonus tactiques
+    const tacticsScore = this.detectTactics(board, newBoard, move, turn);
+    score += tacticsScore;
+    
+    return score;
+  }
+
+  applyMove(board, move) {
+    const newBoard = board.map(row => [...row]);
+    const fromFile = move.charCodeAt(0) - 97;
+    const fromRank = 8 - parseInt(move[1]);
+    const toFile = move.charCodeAt(2) - 97;
+    const toRank = 8 - parseInt(move[3]);
+    newBoard[toRank][toFile] = newBoard[fromRank][fromFile];
+    newBoard[fromRank][fromFile] = '';
+    return newBoard;
+  }
+
+  evaluatePosition(board, turn) {
+    let score = 0;
+    const pieceValues = { 'p': 100, 'n': 320, 'b': 330, 'r': 500, 'q': 900, 'k': 20000 };
+    
+    for (let row = 0; row < 8; row++) {
+      for (let col = 0; col < 8; col++) {
+        const piece = board[row][col];
+        if (!piece) continue;
+        
+        const value = pieceValues[piece.toLowerCase()] || 0;
+        const isWhite = piece === piece.toUpperCase();
+        
+        if ((turn === 'w' && isWhite) || (turn === 'b' && !isWhite)) {
+          score += value;
+        } else {
+          score -= value;
+        }
+        
+        score += this.getPiecePositionBonus(piece, row, col);
+      }
+    }
+    
+    return score;
+  }
+
+  getPiecePositionBonus(piece, row, col) {
+    const pieceType = piece.toLowerCase();
+    const isWhite = piece === piece.toUpperCase();
+    const distFromCenter = Math.abs(row - 3.5) + Math.abs(col - 3.5);
+    let bonus = (7 - distFromCenter) * 2;
+    
+    if (pieceType === 'p') {
+      bonus += isWhite ? (6 - row) * 5 : (row - 1) * 5;
+    }
+    
+    if (pieceType === 'k') {
+      bonus -= distFromCenter * 10;
+    }
+    
+    return bonus;
+  }
+
+  detectTactics(oldBoard, newBoard, move, turn) {
+    let tacticalBonus = 0;
+    
+    const toFile = move.charCodeAt(2) - 97;
+    const toRank = 8 - parseInt(move[3]);
+    
+    // Détecter fourchettes
+    const attacks = this.countAttacks(newBoard, toRank, toFile, turn);
+    if (attacks >= 2) {
+      tacticalBonus += 50 * attacks;
+      console.log('🔱 Fourchette détectée!');
+    }
+    
+    // Détecter échec
+    if (this.isCheck(newBoard, turn)) {
+      tacticalBonus += 40;
+      console.log('♔ Échec détecté!');
+      
+      // Vérifier si c'est mat
+      if (this.isCheckmate(newBoard, turn)) {
+        tacticalBonus += 10000;
+        console.log('♔♔♔ ÉCHEC ET MAT!');
+      }
+    }
+    
+    return tacticalBonus;
+  }
+  
+  isCheckmate(board, turn) {
+    // Vérifier que le roi est en échec
+    if (!this.isCheck(board, turn)) return false;
+    
+    // Vérifier si l'adversaire peut s'échapper
+    const enemyTurn = turn === 'w' ? 'b' : 'w';
+    const enemyMoves = this.generateLegalMoves(board, enemyTurn);
+    
+    // Pour chaque coup possible de l'adversaire
+    for (let move of enemyMoves) {
+      const testBoard = this.applyMove(board, move);
+      
+      // Si après ce coup, le roi n'est plus en échec, ce n'est pas mat
+      if (!this.isCheck(testBoard, turn)) {
+        return false;
+      }
+    }
+    
+    // Aucun coup ne sauve le roi = mat!
+    return true;
+  }
+  
+  isCheck(board, turn) {
+    // Trouver le roi ennemi
+    const enemyKing = turn === 'w' ? 'k' : 'K';
+    let kingRow = -1;
+    let kingCol = -1;
+    
+    for (let row = 0; row < 8; row++) {
+      for (let col = 0; col < 8; col++) {
+        if (board[row][col] === enemyKing) {
+          kingRow = row;
+          kingCol = col;
+          break;
+        }
+      }
+      if (kingRow !== -1) break;
+    }
+    
+    if (kingRow === -1) return false;
+    
+    // Vérifier si une pièce alliée attaque le roi
+    const isWhite = turn === 'w';
+    
+    for (let row = 0; row < 8; row++) {
+      for (let col = 0; col < 8; col++) {
+        const piece = board[row][col];
+        if (!piece) continue;
+        
+        const pieceIsWhite = piece === piece.toUpperCase();
+        if (pieceIsWhite !== isWhite) continue;
+        
+        // Vérifier si cette pièce peut attaquer le roi
+        if (this.canAttack(board, row, col, kingRow, kingCol, piece.toLowerCase())) {
+          return true;
+        }
+      }
+    }
+    
+    return false;
+  }
+  
+  canAttack(board, fromRow, fromCol, toRow, toCol, pieceType) {
+    const dr = toRow - fromRow;
+    const dc = toCol - fromCol;
+    
+    switch (pieceType) {
+      case 'p': {
+        const piece = board[fromRow][fromCol];
+        const isWhite = piece === piece.toUpperCase();
+        const direction = isWhite ? -1 : 1;
+        return dr === direction && Math.abs(dc) === 1;
+      }
+      
+      case 'n':
+        return (Math.abs(dr) === 2 && Math.abs(dc) === 1) || 
+               (Math.abs(dr) === 1 && Math.abs(dc) === 2);
+      
+      case 'b':
+        if (Math.abs(dr) !== Math.abs(dc)) return false;
+        return this.isPathClear(board, fromRow, fromCol, toRow, toCol);
+      
+      case 'r':
+        if (dr !== 0 && dc !== 0) return false;
+        return this.isPathClear(board, fromRow, fromCol, toRow, toCol);
+      
+      case 'q':
+        if (dr !== 0 && dc !== 0 && Math.abs(dr) !== Math.abs(dc)) return false;
+        return this.isPathClear(board, fromRow, fromCol, toRow, toCol);
+      
+      case 'k':
+        return Math.abs(dr) <= 1 && Math.abs(dc) <= 1;
+      
+      default:
+        return false;
+    }
+  }
+  
+  isPathClear(board, fromRow, fromCol, toRow, toCol) {
+    const dr = Math.sign(toRow - fromRow);
+    const dc = Math.sign(toCol - fromCol);
+    
+    let r = fromRow + dr;
+    let c = fromCol + dc;
+    
+    while (r !== toRow || c !== toCol) {
+      if (board[r][c]) return false;
+      r += dr;
+      c += dc;
+    }
+    
+    return true;
+  }
+  
+  countAttacks(board, row, col, turn) {
+    const piece = board[row][col];
+    if (!piece) return 0;
+    
+    const pieceType = piece.toLowerCase();
+    let attackCount = 0;
+    
+    const moves = this.generatePieceMoves(board, row, col, pieceType);
+    
+    for (let move of moves) {
+      const targetFile = move.charCodeAt(0) - 97;
+      const targetRank = 8 - parseInt(move[1]);
+      const target = board[targetRank][targetFile];
+      
+      if (target && this.isValuablePiece(target)) {
+        attackCount++;
+      }
+    }
+    
+    return attackCount;
+  }
+  
+  isValuablePiece(piece) {
+    const type = piece.toLowerCase();
+    return ['n', 'b', 'r', 'q'].includes(type);
+  }
+
+  evaluateMove(board, move, turn) {
+    const fromFile = move.charCodeAt(0) - 97;
+    const fromRank = 8 - parseInt(move[1]);
+    const toFile = move.charCodeAt(2) - 97;
+    const toRank = 8 - parseInt(move[3]);
+    
+    let score = 0;
+    
+    const piece = board[fromRank][fromFile];
+    const target = board[toRank][toFile];
+    
+    const pieceValues = { 'p': 100, 'n': 320, 'b': 330, 'r': 500, 'q': 900, 'k': 0 };
+    
+    // Évaluation de la capture avec SEE (Static Exchange Evaluation)
+    if (target) {
+      const captureValue = pieceValues[target.toLowerCase()] || 0;
+      const attackerValue = pieceValues[piece.toLowerCase()] || 0;
+      
+      // Si on capture quelque chose de plus précieux, c'est bon
+      score += captureValue;
+      
+      // Mais attention : vérifier si la case est défendue
+      const isDefended = this.isSquareDefended(board, toRank, toFile, turn === 'w' ? 'b' : 'w');
+      
+      if (isDefended) {
+        // La case est défendue, on risque de perdre notre pièce
+        // Évaluer l'échange
+        if (attackerValue > captureValue) {
+          // Mauvais échange : on perd plus qu'on gagne
+          score -= (attackerValue - captureValue) * 0.8; // Pénalité
+          console.log(`⚠️ Mauvais échange : ${piece} (${attackerValue}) pour ${target} (${captureValue})`);
+        } else if (attackerValue === captureValue) {
+          // Échange égal
+          score += 10; // Petit bonus pour simplifier
+        } else {
+          // Bon échange : on gagne plus qu'on perd
+          score += 20;
+        }
+      } else {
+        // Capture gratuite !
+        score += 30;
+        console.log(`✨ Capture gratuite : ${target}`);
+      }
+    }
+    
+    // Contrôle du centre
+    const centerSquares = [[3,3],[3,4],[4,3],[4,4]];
+    if (centerSquares.some(([r,c]) => r === toRank && c === toFile)) {
+      score += 30;
+    }
+    
+    // Développement
+    const backRank = turn === 'w' ? 7 : 0;
+    if (fromRank === backRank && ['n','b'].includes(piece.toLowerCase())) {
+      score += 20;
+    }
+    
+    // Avancer les pions centraux
+    if (piece.toLowerCase() === 'p' && (toFile === 3 || toFile === 4)) {
+      score += 15;
+    }
+    
+    // Pénalité pour exposer des pièces précieuses
+    if (['q', 'r'].includes(piece.toLowerCase())) {
+      const isExposed = this.isSquareAttacked(board, toRank, toFile, turn === 'w' ? 'b' : 'w');
+      if (isExposed) {
+        score -= 40;
+        console.log(`⚠️ Pièce précieuse exposée : ${piece}`);
+      }
+    }
+    
+    return score;
+  }
+  
+  isSquareDefended(board, row, col, byColor) {
+    // Vérifier si une case est défendue par une couleur
+    const isWhite = byColor === 'w';
+    
+    for (let r = 0; r < 8; r++) {
+      for (let c = 0; c < 8; c++) {
+        const piece = board[r][c];
+        if (!piece) continue;
+        
+        const pieceIsWhite = piece === piece.toUpperCase();
+        if (pieceIsWhite !== isWhite) continue;
+        
+        if (this.canAttack(board, r, c, row, col, piece.toLowerCase())) {
+          return true;
+        }
+      }
+    }
+    
+    return false;
+  }
+  
+  isSquareAttacked(board, row, col, byColor) {
+    // Alias pour isSquareDefended (plus clair sémantiquement)
+    return this.isSquareDefended(board, row, col, byColor);
   }
 }
 
