@@ -9,19 +9,17 @@
   ],
   "host_permissions": [
     "https://www.chess.com/*",
-    "https://lichess.org/*"
+    "https://lichess.org/*",
+    "https://explorer.lichess.ovh/*"
   ],
+  "background": {
+    "service_worker": "background.js"
+  },
   "content_scripts": [
     {
       "matches": ["https://www.chess.com/play/*", "https://www.chess.com/game/live/*"],
       "js": ["content.js"],
       "run_at": "document_end"
-    }
-  ],
-  "web_accessible_resources": [
-    {
-      "resources": ["stockfish.js", "stockfish.wasm"],
-      "matches": ["https://www.chess.com/*"]
     }
   ],
   "action": {
